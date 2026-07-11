@@ -13,6 +13,7 @@ import socket
 import pwd
 import stat
 import re
+import secrets
 import shutil
 from pathlib import Path
 
@@ -22,7 +23,7 @@ except ImportError:
     print("Ошибка: требуется jinja2. Установите: pip3 install jinja2")
     sys.exit(1)
 
-SCRIPT_VERSION = "7.2"
+SCRIPT_VERSION = "7.3"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 TEMPLATES_DIR = SCRIPT_DIR / "templates"
 
@@ -588,38 +589,40 @@ def setup_oauth2proxy():
         return
 
     env_content = oauth2proxy_env.read_text()
-    has_client_id = "OAUTH2_CLIENT_ID" in env_content and "''" not in env_content.split("OAUTH2_CLIENT_ID=")[1].split("\n")[0].strip("'\"")
+    has_client_id = "OAUTH2_PROXY_CLIENT_ID" in env_content and "''" not in env_content.split("OAUTH2_PROXY_CLIENT_ID=")[1].split("\n")[0].strip("'\"")
     if not has_client_id:
-        print_warning("OAUTH2_CLIENT_ID не задан — пропускаю OAuth2-Proxy")
+        print_warning("OAUTH2_PROXY_CLIENT_ID не задан — пропускаю OAuth2-Proxy")
         return
 
     oauth2proxy_dir = Path(f"{CONFIG['docker_dir']}/oauth2proxy")
     oauth2proxy_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate cookie secret if not set
-    if "OAUTH2_COOKIE_SECRET" in env_content:
+    # Generate cookie secret (16 raw bytes) if not set
+    def gen_cookie_secret():
+        return secrets.token_hex(16)[:16]
+
+    if "OAUTH2_PROXY_COOKIE_SECRET" in env_content:
         for line in env_content.split("\n"):
-            if line.startswith("OAUTH2_COOKIE_SECRET="):
+            if line.startswith("OAUTH2_PROXY_COOKIE_SECRET="):
                 val = line.split("=", 1)[1].strip().strip("'\"")
                 if not val:
-                    import base64, secrets
-                    new_secret = base64.b64encode(secrets.token_bytes(32)).decode()
+                    new_secret = gen_cookie_secret()
                     oauth2proxy_env.write_text(env_content.replace(
-                        line, f"OAUTH2_COOKIE_SECRET='{new_secret}'"
+                        line, f"OAUTH2_PROXY_COOKIE_SECRET={new_secret}"
                     ))
-                    print_success("OAUTH2_COOKIE_SECRET сгенерирован автоматически")
+                    print_success("OAUTH2_PROXY_COOKIE_SECRET сгенерирован автоматически")
                 break
 
     # Write emails.txt from env
     emails = []
     for line in env_content.split("\n"):
-        if line.startswith("OAUTH2_EMAIL_WHITELIST="):
+        if line.startswith("OAUTH2_PROXY_EMAIL_WHITELIST="):
             val = line.split("=", 1)[1].strip().strip("'\"")
             emails = [e.strip() for e in val.split(",") if e.strip()]
             break
 
     if not emails:
-        print_warning("OAUTH2_EMAIL_WHITELIST пуст — пропускаю OAuth2-Proxy")
+        print_warning("OAUTH2_PROXY_EMAIL_WHITELIST пуст — пропускаю OAuth2-Proxy")
         return
 
     oauth2proxy_emails.write_text("\n".join(emails) + "\n")
