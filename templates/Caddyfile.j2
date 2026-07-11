@@ -27,9 +27,9 @@
     redir https://{% endraw %}{{ domain_main }}{% raw %}{uri} permanent
 }
 
-# Bifrost AI Router
+# Bifrost AI Router (через OAuth2-Proxy)
 {% endraw %}{{ domain_app }}{% raw %} {
-    reverse_proxy {% endraw %}{{ container_bifrost }}{% raw %}:8080
+    reverse_proxy {% endraw %}{{ container_oauth2proxy }}{% raw %}:4180
     encode gzip
 }
 {% endraw %}

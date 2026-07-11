@@ -22,7 +22,7 @@ except ImportError:
     print("Ошибка: требуется jinja2. Установите: pip3 install jinja2")
     sys.exit(1)
 
-SCRIPT_VERSION = "7.1"
+SCRIPT_VERSION = "7.2"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 TEMPLATES_DIR = SCRIPT_DIR / "templates"
 
@@ -45,6 +45,7 @@ CONFIG = {
     "container_ghost": "mais-ghost",
     "container_bifrost": "mais-bifrost",
     "container_caddy": "mais-caddy",
+    "container_oauth2proxy": "mais-oauth2proxy",
 
     "net_caddy": "mais-caddy-net",
     "net_ghost": "mais-ghost-net",
@@ -54,6 +55,9 @@ CONFIG = {
     "vol_bifrost_data": "mais-bifrost-data",
     "vol_caddy_data": "mais-caddy-data",
     "vol_caddy_config": "mais-caddy-config",
+
+    "oauth2proxy_env_path": "/opt/secrets/oauth2.env",
+    "oauth2proxy_emails_path": "/opt/secrets/oauth2-emails.txt",
 
     "ghost_cpus": "0.5",
     "ghost_memory": "768M",
@@ -495,6 +499,7 @@ def setup_directories():
         f"{CONFIG['docker_dir']}/ghost",
         f"{CONFIG['docker_dir']}/bifrost",
         f"{CONFIG['docker_dir']}/caddy",
+        f"{CONFIG['docker_dir']}/oauth2proxy",
     ]
     for dir_path in dirs:
         Path(dir_path).mkdir(parents=True, exist_ok=True)
@@ -569,7 +574,77 @@ def setup_bifrost():
 
 
 # ============================================================
-# ШАГ 9: CADDY
+# ШАГ 9: OAUTH2-PROXY (Yandex)
+# ============================================================
+def setup_oauth2proxy():
+    print_header("9. Настройка OAuth2-Proxy (Yandex)")
+
+    oauth2proxy_env = Path(CONFIG['oauth2proxy_env_path'])
+    oauth2proxy_emails = Path(CONFIG['oauth2proxy_emails_path'])
+
+    if not oauth2proxy_env.exists():
+        print_warning(f"Файл {oauth2proxy_env} не найден")
+        print_warning("OAuth2-Proxy не будет запущен без client-id и client-secret")
+        return
+
+    env_content = oauth2proxy_env.read_text()
+    has_client_id = "OAUTH2_CLIENT_ID" in env_content and "''" not in env_content.split("OAUTH2_CLIENT_ID=")[1].split("\n")[0].strip("'\"")
+    if not has_client_id:
+        print_warning("OAUTH2_CLIENT_ID не задан — пропускаю OAuth2-Proxy")
+        return
+
+    oauth2proxy_dir = Path(f"{CONFIG['docker_dir']}/oauth2proxy")
+    oauth2proxy_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate cookie secret if not set
+    if "OAUTH2_COOKIE_SECRET" in env_content:
+        for line in env_content.split("\n"):
+            if line.startswith("OAUTH2_COOKIE_SECRET="):
+                val = line.split("=", 1)[1].strip().strip("'\"")
+                if not val:
+                    import base64, secrets
+                    new_secret = base64.b64encode(secrets.token_bytes(32)).decode()
+                    oauth2proxy_env.write_text(env_content.replace(
+                        line, f"OAUTH2_COOKIE_SECRET='{new_secret}'"
+                    ))
+                    print_success("OAUTH2_COOKIE_SECRET сгенерирован автоматически")
+                break
+
+    # Write emails.txt from env
+    emails = []
+    for line in env_content.split("\n"):
+        if line.startswith("OAUTH2_EMAIL_WHITELIST="):
+            val = line.split("=", 1)[1].strip().strip("'\"")
+            emails = [e.strip() for e in val.split(",") if e.strip()]
+            break
+
+    if not emails:
+        print_warning("OAUTH2_EMAIL_WHITELIST пуст — пропускаю OAuth2-Proxy")
+        return
+
+    oauth2proxy_emails.write_text("\n".join(emails) + "\n")
+    oauth2proxy_emails.chmod(0o600)
+    print_success(f"Создан emails.txt с {len(emails)} email'ами")
+
+    # Copy env to docker dir
+    shutil.copy2(str(oauth2proxy_env), str(oauth2proxy_dir / ".env"))
+    (oauth2proxy_dir / ".env").chmod(0o600)
+
+    compose_path = oauth2proxy_dir / "compose.yml"
+    write_config(str(compose_path), "oauth2proxy-compose.yml.j2", CONFIG)
+
+    if container_exists(CONFIG['container_oauth2proxy']):
+        print_success(f"Контейнер {CONFIG['container_oauth2proxy']} уже существует, перезапуск")
+        os.chdir(str(oauth2proxy_dir))
+        run_command(["docker", "compose", "up", "-d"])
+    else:
+        os.chdir(str(oauth2proxy_dir))
+        run_command(["docker", "compose", "up", "-d"])
+        wait_for_container(CONFIG['container_oauth2proxy'], timeout=30)
+
+
+# ============================================================
+# ШАГ 10: CADDY
 # ============================================================
 def setup_caddy():
     print_header("9. Настройка Caddy")
@@ -596,7 +671,7 @@ def setup_caddy():
 
 
 # ============================================================
-# ШАГ 10: ПРОВЕРКА
+# ШАГ 11: ПРОВЕРКА
 # ============================================================
 def verify():
     print_header("10. Проверка")
@@ -637,7 +712,7 @@ def verify():
 
 
 # ============================================================
-# ШАГ 11: ОБСЛУЖИВАНИЕ (cron)
+# ШАГ 12: ОБСЛУЖИВАНИЕ (cron)
 # ============================================================
 def setup_maintenance():
     print_header("11. Обслуживание диска")
@@ -658,7 +733,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 
 # ============================================================
-# ШАГ 12: УТИЛИТЫ УПРАВЛЕНИЯ
+# ШАГ 13: УТИЛИТЫ УПРАВЛЕНИЯ
 # ============================================================
 def create_utils():
     print_header("12. Утилиты управления")
@@ -678,7 +753,8 @@ case $SERVICE in
     ghost) docker logs -f --tail 50 mais-ghost ;;
     bifrost) docker logs -f --tail 50 mais-bifrost ;;
     caddy) docker logs -f --tail 50 mais-caddy ;;
-    *) echo "Использование: mais-logs [ghost|bifrost|caddy]" ;;
+    oauth2proxy) docker logs -f --tail 50 mais-oauth2proxy ;;
+    *) echo "Использование: mais-logs [ghost|bifrost|caddy|oauth2proxy]" ;;
 esac
 """,
         "restart": r"""#!/bin/bash
@@ -687,8 +763,9 @@ case $SERVICE in
     ghost) docker restart mais-ghost ;;
     bifrost) docker restart mais-bifrost ;;
     caddy) docker restart mais-caddy ;;
-    all) docker restart mais-ghost mais-bifrost mais-caddy ;;
-    *) echo "Использование: mais-restart [ghost|bifrost|caddy|all]" ;;
+    oauth2proxy) docker restart mais-oauth2proxy ;;
+    all) docker restart mais-ghost mais-bifrost mais-caddy mais-oauth2proxy ;;
+    *) echo "Использование: mais-restart [ghost|bifrost|caddy|oauth2proxy|all]" ;;
 esac
 """,
     }
@@ -716,6 +793,7 @@ def final():
   • Ghost {CONFIG['ghost_version']} → {CONFIG['domain_main']}
   • Bifrost {CONFIG['bifrost_version']} → {CONFIG['domain_app']}
   • Caddy {CONFIG['caddy_version']} (reverse proxy + HTTPS)
+  • OAuth2-Proxy (Yandex) → {CONFIG['domain_app']} (защита email whitelist)
 
 {Colors.OKGREEN}Ресурсы:{Colors.ENDC}
   • ZRAM: активен (lz4, 2x RAM)
@@ -733,7 +811,8 @@ def final():
   1. Security Groups: открыть TCP 80, 443 от 0.0.0.0/0
   2. DNS: {CONFIG['domain_main']} и {CONFIG['domain_app']} → IP сервера
   3. Добавить API-ключи в /opt/secrets/bifrost.env
-  4. Подождать получения SSL-сертификатов Caddy
+  4. Добавить OAuth2-ключи в {CONFIG['oauth2proxy_env_path']}
+  5. Подождать получения SSL-сертификатов Caddy
 """)
 
 
@@ -767,6 +846,7 @@ def main():
         setup_networks()
         setup_ghost()
         setup_bifrost()
+        setup_oauth2proxy()
         setup_caddy()
         verify()
         setup_maintenance()
