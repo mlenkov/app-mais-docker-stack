@@ -90,12 +90,7 @@ sudo python3 mais_server_setup.py
 
 1. **Security Groups** — открыть TCP 80, 443 от `0.0.0.0/0` в панели облачного провайдера
 2. **DNS** — проверить A-записи для `mais.agency` и `app.mais.agency`
-3. **API-ключи Bifrost** — отредактировать `/opt/docker/bifrost/.env`:
-   ```
-   OPENAI_API_KEY=sk-...
-   ANTHROPIC_API_KEY=sk-...
-   ```
-4. **SSL** — Caddy получит сертификаты автоматически. Проверить:
+3. **SSL** — Caddy получит сертификаты автоматически. Проверить:
    ```bash
    mais-logs caddy | grep certificate
    ```

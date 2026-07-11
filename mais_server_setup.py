@@ -13,6 +13,7 @@ import socket
 import pwd
 import stat
 import re
+import shutil
 from pathlib import Path
 
 try:
@@ -444,6 +445,22 @@ def setup_secrets():
         print_warning(f"Создан пустой шаблон {bifrost_env} — добавьте API-ключи!")
 
 
+def sync_app_secrets():
+    print_step("Синхронизация .env Bifrost из Base-слоя")
+
+    source = Path(CONFIG['bifrost_env_path'])
+    dest = Path(f"{CONFIG['docker_dir']}/bifrost/.env")
+
+    if source.exists():
+        shutil.copy2(str(source), str(dest))
+        dest.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        print_success("✅ Секреты Bifrost успешно подхвачены из Base-слоя")
+    else:
+        print_warning(f"Файл {source} не найден — создан пустой шаблон")
+        dest.write_text("# Bifrost API Keys\n# OPENAI_API_KEY=\n# ANTHROPIC_API_KEY=\n")
+        dest.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
 def setup_app_user():
     print_step("Проверка пользователя для контейнеров")
 
@@ -525,6 +542,8 @@ def setup_bifrost():
 
     bifrost_dir = Path(f"{CONFIG['docker_dir']}/bifrost")
     bifrost_dir.mkdir(parents=True, exist_ok=True)
+
+    sync_app_secrets()
 
     compose_path = bifrost_dir / "compose.yml"
     write_config(str(compose_path), "bifrost-compose.yml.j2", CONFIG)
