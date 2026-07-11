@@ -22,7 +22,7 @@ except ImportError:
     print("Ошибка: требуется jinja2. Установите: pip3 install jinja2")
     sys.exit(1)
 
-SCRIPT_VERSION = "7.0"
+SCRIPT_VERSION = "7.1"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 TEMPLATES_DIR = SCRIPT_DIR / "templates"
 
@@ -39,7 +39,7 @@ CONFIG = {
     "user": "mais",
 
     "ghost_version": "6.52.0",
-    "bifrost_version": "1.4.9",
+    "bifrost_version": "v1.6.3",
     "caddy_version": "2.10.2",
 
     "container_ghost": "mais-ghost",
@@ -124,6 +124,12 @@ def run_command(cmd, check=True, capture=False, timeout=120):
     except subprocess.TimeoutExpired:
         cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
         print_warning(f"Таймаут команды: {cmd_str}")
+        return False
+    except FileNotFoundError:
+        cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
+        if not check:
+            return False
+        print_error(f"Команда не найдена: {cmd_str}")
         return False
 
 
@@ -387,10 +393,14 @@ table inet filter {{
 # Managed by mais_server_setup.py
 add rule inet filter input tcp dport { 80, 443 } accept comment "app-mais-http-https"
 add rule inet filter input udp dport 443 accept comment "app-mais-quic"
+add rule inet filter forward iifname "br-*" counter accept comment "docker-bridge-forward"
+add rule inet filter forward oifname "br-*" counter accept comment "docker-bridge-forward"
+add rule inet filter forward iifname "docker0" counter accept comment "docker-bridge-forward"
+add rule inet filter forward oifname "docker0" counter accept comment "docker-bridge-forward"
 """
     if not dropin_path.exists():
         dropin_path.write_text(nft_rules)
-        print_success("Создан /etc/nftables.d/99-mais-app.nft с правилами 80/443")
+        print_success("Создан /etc/nftables.d/99-mais-app.nft с правилами 80/443 + Docker bridge")
     else:
         print_success("Правила фаервола уже существуют")
 

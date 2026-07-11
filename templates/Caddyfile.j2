@@ -6,14 +6,6 @@
     }
 }
 
-# Rate limiting (защита от L7 DDoS)
-@ratelimit {
-    rate_limit {
-        key {remote_host}
-        rate 20 rps
-    }
-}
-
 # Ghost CMS
 {% endraw %}{{ domain_main }}{% raw %} {
     reverse_proxy {% endraw %}{{ container_ghost }}{% raw %}:2368 {
