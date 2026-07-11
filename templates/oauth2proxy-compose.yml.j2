@@ -1,7 +1,7 @@
 name: mais
 services:
   oauth2proxy:
-    image: quay.io/oauth2-proxy/oauth2-proxy:latest
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.5.0
     container_name: {{ container_oauth2proxy }}
     restart: unless-stopped
     expose:
@@ -14,7 +14,10 @@ services:
     volumes:
       - ./emails.txt:/etc/oauth2-proxy/emails.txt:ro
     command:
-      - --provider=yandex
+      - --provider=google
+      - --login-url=https://oauth.yandex.ru/authorize
+      - --redeem-url=https://oauth.yandex.ru/token
+      - --validate-url=https://login.yandex.ru/info
       - --http-address=0.0.0.0:4180
       - --upstream=http://{{ container_bifrost }}:8080
       - --redirect-url=https://{{ domain_app }}/oauth2/callback
