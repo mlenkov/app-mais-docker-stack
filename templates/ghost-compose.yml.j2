@@ -1,0 +1,43 @@
+name: mais
+services:
+  ghost:
+    image: ghost:{{ ghost_version }}-alpine
+    container_name: {{ container_ghost }}
+    user: "{{ app_uid }}:{{ app_gid }}"
+    restart: unless-stopped
+    expose:
+      - "2368"
+    environment:
+      NODE_ENV: production
+      url: https://{{ domain_main }}
+      database__client: sqlite3
+      database__connection__filename: /var/lib/ghost/content/data/ghost.db
+      NODE_OPTIONS: "--max-old-space-size={{ ghost_node_memory }}"
+    volumes:
+      - {{ vol_ghost_data }}:/var/lib/ghost/content
+    networks:
+      - {{ net_ghost }}
+    labels:
+      project: "mais"
+      service: "ghost"
+      environment: "production"
+    deploy:
+      resources:
+        limits:
+          cpus: '{{ ghost_cpus }}'
+          memory: {{ ghost_memory }}
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:2368/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  {{ vol_ghost_data }}:
+    name: {{ vol_ghost_data }}
+
+networks:
+  {{ net_ghost }}:
+    external: true
+    name: {{ net_ghost }}

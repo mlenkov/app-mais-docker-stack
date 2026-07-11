@@ -1,0 +1,43 @@
+name: mais
+services:
+  bifrost:
+    image: maximhq/bifrost:{{ bifrost_version }}
+    container_name: {{ container_bifrost }}
+    user: "{{ app_uid }}:{{ app_gid }}"
+    restart: unless-stopped
+    expose:
+      - "8080"
+    env_file: {{ bifrost_env_path }}
+    environment:
+      APP_PORT: 8080
+      APP_HOST: 0.0.0.0
+      LOG_LEVEL: info
+      LOG_STYLE: json
+    volumes:
+      - {{ vol_bifrost_data }}:/app/data
+    networks:
+      - {{ net_bifrost }}
+    labels:
+      project: "mais"
+      service: "bifrost"
+      environment: "production"
+    deploy:
+      resources:
+        limits:
+          cpus: '{{ bifrost_cpus }}'
+          memory: {{ bifrost_memory }}
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  {{ vol_bifrost_data }}:
+    name: {{ vol_bifrost_data }}
+
+networks:
+  {{ net_bifrost }}:
+    external: true
+    name: {{ net_bifrost }}

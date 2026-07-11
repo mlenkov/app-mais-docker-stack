@@ -1,0 +1,43 @@
+{% raw %}{
+    email {% endraw %}{{ email_acme }}{% raw %}
+    log {
+        output stdout
+        format json
+    }
+}
+
+# Rate limiting (защита от L7 DDoS)
+@ratelimit {
+    rate_limit {
+        key {remote_host}
+        rate 20 rps
+    }
+}
+
+# Ghost CMS
+{% endraw %}{{ domain_main }}{% raw %} {
+    reverse_proxy {% endraw %}{{ container_ghost }}{% raw %}:2368 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+    encode gzip
+    @static {
+        path *.css *.js *.png *.jpg *.jpeg *.gif *.ico *.woff *.woff2 *.ttf
+    }
+    handle @static {
+        header Cache-Control "public, max-age=31536000"
+    }
+}
+
+# Редирект www → основной домен
+{% endraw %}{{ domain_www }}{% raw %} {
+    redir https://{% endraw %}{{ domain_main }}{% raw %}{uri} permanent
+}
+
+# Bifrost AI Router
+{% endraw %}{{ domain_app }}{% raw %} {
+    reverse_proxy {% endraw %}{{ container_bifrost }}{% raw %}:8080
+    encode gzip
+}
+{% endraw %}

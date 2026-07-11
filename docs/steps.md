@@ -1,39 +1,58 @@
 # Пошаговое описание установки
 
-Скрипт `mais_server_setup.py` выполняет 10 последовательных шагов.
+Скрипт `mais_server_setup.py` (v7.0) выполняет 13 последовательных шагов.
 
-## Шаг 1. Обновление системы (`update_system`)
+## Шаг 0. Обновление системы (`update_system`)
 
 - `apt-get update`
-- Установка: curl, wget, git, ca-certificates, gnupg, lsb-release, nftables, python3-jinja2
+- Установка: curl, wget, git, ca-certificates, gnupg, python3-jinja2
+- **nftables не устанавливается** — Base-слой уже настроил фаервол
+
+## Шаг 1. ZRAM (`setup_zram`)
+
+- Вместо статичного swap-файла на SSD
+- Пытается установить `systemd-zram-generator`; если недоступен — `zram-tools`
+- Конфиг: `zram-size = ram * 2`, `lz4` (быстрое сжатие), `swap-priority = 100`
+- `vm.swappiness = 60` через `/etc/sysctl.d/99-mais-zram.conf`
 
 ## Шаг 2. Установка Docker (`install_docker`)
 
 - Удаление старых версий Docker
 - Добавление официального репозитория Docker для Debian
 - Установка: docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin
-- Настройка `daemon.json`: registry mirror (`dh-mirror.gitverse.ru`), log rotation (10MB, 3 файла)
 - Добавление пользователя `mais` в группу `docker`
-- Включение и запуск Docker systemd-сервиса
 
-## Шаг 3. Настройка фаервола (`configure_firewall`)
+### Настройка Docker Daemon (`configure_docker_daemon`)
 
+- Чтение существующего `/etc/docker/daemon.json` (слияние конфигов)
+- Registry mirror: `dh-mirror.gitverse.ru`
+- Log rotation: `max-size=10m`, `max-file=3`
+
+## Шаг 3. Фаервол (nftables drop-in) (`setup_firewall_rules`)
+
+- **Не перезаписывает** `/etc/nftables.conf` Base-слоя
+- Создаёт `/etc/nftables.d/99-mais-app.nft` с правилами для портов 80/443
+- Добавляет `include "/etc/nftables.d/*.nft"` в главный конфиг (если отсутствует)
+- Применяет правила идемпотентно (проверяет наличие `app-mais-http-https`)
+
+### Sysctl (`configure_sysctl`)
+
+- `/etc/sysctl.d/99-mais-docker.conf` — bridge-nf-call-iptables, ip_forward, rp_filter
 - Загрузка модуля `br_netfilter`
-- Настройка sysctl: bridge-nf-call-iptables, ip_forward, rp_filter
-- nftables ruleset:
-  - Default policy: DROP на вход
-  - Разрешено: established/related, loopback, ICMP, SSH (22), HTTP (80), HTTPS (443)
-  - Forward: DROP (но ACCEPT для трафика Docker)
-  - Output: ACCEPT
 
-## Шаг 4. Создание структуры папок (`setup_directories`)
+## Шаг 4. Секреты (`setup_secrets`, `setup_app_user`)
+
+- Создаёт `/opt/secrets/bifrost.env` (chmod 600), если не существует
+- Создаёт системного пользователя `appuser` (UID 1000) для запуска контейнеров не от root
+
+## Шаг 5. Структура папок (`setup_directories`)
 
 - `/opt/docker/ghost/`
 - `/opt/docker/bifrost/`
 - `/opt/docker/caddy/`
 - Владелец: `mais:mais`
 
-## Шаг 5. Создание Docker-сетей (`setup_networks`)
+## Шаг 6. Docker-сети (`setup_networks`)
 
 Три bridge-сети (создаются, если не существуют):
 
@@ -43,39 +62,49 @@
 | `mais-ghost-net` | Ghost CMS |
 | `mais-bifrost-net` | Bifrost + MCP |
 
-## Шаг 6. Ghost CMS (`setup_ghost`)
+## Шаг 7. Ghost CMS (`setup_ghost`)
 
-- Генерация `compose.yml` из Jinja2-шаблона
-- Запуск: `docker compose up -d`
-- Ожидание healthcheck (порт 2368, max 90 секунд)
+- Генерация `compose.yml` из `templates/ghost-compose.yml.j2`
+- CPU лимит: 0.5, RAM лимит: 768M, Node memory: 512MB
+- `user: "1000:1000"` (не root)
+- Порт: 2368 (internal)
+- Запуск и ожидание healthcheck (max 90 секунд)
 
-## Шаг 7. Bifrost (`setup_bifrost`)
+## Шаг 8. Bifrost (`setup_bifrost`)
 
-- Создание пустого `.env` с комментариями-заглушками для API-ключей
-- Генерация `compose.yml` из Jinja2-шаблона
-- Запуск: `docker compose up -d`
-- Ожидание healthcheck (порт 8080, max 60 секунд)
+- Генерация `compose.yml` из `templates/bifrost-compose.yml.j2`
+- `env_file: /opt/secrets/bifrost.env` (безопасное хранение ключей)
+- CPU лимит: 0.5, RAM лимит: 512M
+- `user: "1000:1000"` (не root)
+- Порт: 8080 (internal)
+- Запуск и ожидание healthcheck (max 60 секунд)
 
-## Шаг 8. Caddy (`setup_caddy`)
+## Шаг 9. Caddy (`setup_caddy`)
 
-- Проверка DNS для `mais.agency` и `app.mais.agency` (предупреждение, если не резолвятся)
-- Генерация `compose.yml` и `Caddyfile` из Jinja2-шаблона
-- Запуск: `docker compose up -d`
-- Ожидание healthcheck (порт 80, max 30 секунд)
+- Проверка DNS для `mais.agency` и `app.mais.agency`
+- Генерация `compose.yml` и `Caddyfile` из шаблонов
+- CPU лимит: 0.3, RAM лимит: 128M
+- Rate limiting в Caddyfile (20 rps)
+- Порты: 80, 443 (публичные)
+- Запуск и ожидание healthcheck (max 30 секунд)
 
-## Шаг 9. Проверка (`verify`)
+## Шаг 10. Проверка (`verify`)
 
-- Вывод таблицы контейнеров (фильтр: `label=project=mais`)
-- Вывод сетей (фильтр: `name=mais-`)
-- Вывод томов (фильтр: `name=mais-`)
-- Проверка, что порты 80 и 443 слушаются на хосте
+- Вывод таблицы контейнеров (фильтр: `project=mais`)
+- Вывод сетей и томов
+- Проверка портов 80/443 на хосте
+- Проверка активности ZRAM
 
-## Шаг 10. Утилиты (`create_utils`)
+## Шаг 11. Обслуживание диска (`setup_maintenance`)
 
-Три скрипта в `/usr/local/bin/`:
+- Cron-задача `/etc/cron.d/mais-docker-prune`
+- `docker system prune -af --volumes` каждое воскресенье в 3:00
+- Логи через `logger`
+
+## Шаг 12. Утилиты (`create_utils`)
 
 | Скрипт | Описание |
 |--------|----------|
-| `mais-status` | Показывает статус всех контейнеров стека |
-| `mais-logs` | Хвостит логи указанного сервиса (ghost/bifrost/caddy) |
-| `mais-restart` | Перезапускает указанный сервис (ghost/bifrost/caddy/all) |
+| `mais-status` | Статус всех контейнеров стека |
+| `mais-logs` | Логи сервиса (ghost/bifrost/caddy) |
+| `mais-restart` | Перезапуск (ghost/bifrost/caddy/all) |

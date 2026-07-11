@@ -1,0 +1,50 @@
+name: mais
+services:
+  caddy:
+    image: caddy:{{ caddy_version }}-alpine
+    container_name: {{ container_caddy }}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - {{ vol_caddy_data }}:/data
+      - {{ vol_caddy_config }}:/config
+    networks:
+      - {{ net_caddy }}
+      - {{ net_ghost }}
+      - {{ net_bifrost }}
+    labels:
+      project: "mais"
+      service: "caddy"
+      environment: "production"
+    deploy:
+      resources:
+        limits:
+          cpus: '{{ caddy_cpus }}'
+          memory: {{ caddy_memory }}
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  {{ vol_caddy_data }}:
+    name: {{ vol_caddy_data }}
+  {{ vol_caddy_config }}:
+    name: {{ vol_caddy_config }}
+
+networks:
+  {{ net_caddy }}:
+    external: true
+    name: {{ net_caddy }}
+  {{ net_ghost }}:
+    external: true
+    name: {{ net_ghost }}
+  {{ net_bifrost }}:
+    external: true
+    name: {{ net_bifrost }}

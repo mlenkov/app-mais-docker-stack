@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Скрипт автоматической установки и настройки сервера для Mais Agency
-Версия: 6.1 (Единый стиль именования, Jinja2 safe, project_name)
+Версия: 7.0 (Refactored: ZRAM, resource limits, idempotent, nftables drop-in)
 """
 
 import subprocess
@@ -10,215 +10,63 @@ import os
 import time
 import json
 import socket
+import pwd
+import stat
+import re
 from pathlib import Path
 
 try:
-    from jinja2 import Template
+    from jinja2 import Environment, FileSystemLoader
 except ImportError:
     print("Ошибка: требуется jinja2. Установите: pip3 install jinja2")
     sys.exit(1)
 
-SCRIPT_VERSION = "6.1"
+SCRIPT_VERSION = "7.0"
+SCRIPT_DIR = Path(__file__).parent.resolve()
+TEMPLATES_DIR = SCRIPT_DIR / "templates"
 
 # ============================================================
 # КОНФИГУРАЦИЯ
 # ============================================================
 CONFIG = {
-    # Домены
     "domain_main": "mais.agency",
     "domain_www": "www.mais.agency",
     "domain_app": "app.mais.agency",
     "email_acme": "admin@mais.agency",
 
-    # Пути
     "docker_dir": "/opt/docker",
     "user": "mais",
 
-    # Версии образов
     "ghost_version": "6.52.0",
     "bifrost_version": "1.4.9",
     "caddy_version": "2.10.2",
 
-    # Имена контейнеров (kebab-case)
     "container_ghost": "mais-ghost",
     "container_bifrost": "mais-bifrost",
     "container_caddy": "mais-caddy",
 
-    # Сети (kebab-case)
     "net_caddy": "mais-caddy-net",
     "net_ghost": "mais-ghost-net",
     "net_bifrost": "mais-bifrost-net",
 
-    # Volumes (kebab-case)
     "vol_ghost_data": "mais-ghost-data",
     "vol_bifrost_data": "mais-bifrost-data",
     "vol_caddy_data": "mais-caddy-data",
     "vol_caddy_config": "mais-caddy-config",
+
+    "ghost_cpus": "0.5",
+    "ghost_memory": "768M",
+    "ghost_node_memory": "512",
+    "bifrost_cpus": "0.5",
+    "bifrost_memory": "512M",
+    "caddy_cpus": "0.3",
+    "caddy_memory": "128M",
+
+    "app_uid": 1000,
+    "app_gid": 1000,
+
+    "bifrost_env_path": "/opt/secrets/bifrost.env",
 }
-
-# ============================================================
-# ШАБЛОНЫ КОНФИГОВ
-# ============================================================
-GHOST_COMPOSE_TPL = """name: mais
-services:
-  ghost:
-    image: ghost:{{ ghost_version }}-alpine
-    container_name: {{ container_ghost }}
-    restart: unless-stopped
-    expose:
-      - "2368"
-    environment:
-      NODE_ENV: production
-      url: https://{{ domain_main }}
-      database__client: sqlite3
-      database__connection__filename: /var/lib/ghost/content/data/ghost.db
-    volumes:
-      - {{ vol_ghost_data }}:/var/lib/ghost/content
-    networks:
-      - {{ net_ghost }}
-    labels:
-      project: "mais"
-      service: "ghost"
-      environment: "production"
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:2368/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
-volumes:
-  {{ vol_ghost_data }}:
-    name: {{ vol_ghost_data }}
-
-networks:
-  {{ net_ghost }}:
-    external: true
-    name: {{ net_ghost }}
-"""
-
-BIFROST_COMPOSE_TPL = """name: mais
-services:
-  bifrost:
-    image: maximhq/bifrost:{{ bifrost_version }}
-    container_name: {{ container_bifrost }}
-    restart: unless-stopped
-    expose:
-      - "8080"
-    env_file: .env
-    environment:
-      APP_PORT: 8080
-      APP_HOST: 0.0.0.0
-      LOG_LEVEL: info
-      LOG_STYLE: json
-    volumes:
-      - {{ vol_bifrost_data }}:/app/data
-    networks:
-      - {{ net_bifrost }}
-    labels:
-      project: "mais"
-      service: "bifrost"
-      environment: "production"
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-volumes:
-  {{ vol_bifrost_data }}:
-    name: {{ vol_bifrost_data }}
-
-networks:
-  {{ net_bifrost }}:
-    external: true
-    name: {{ net_bifrost }}
-"""
-
-CADDY_COMPOSE_TPL = """name: mais
-services:
-  caddy:
-    image: caddy:{{ caddy_version }}-alpine
-    container_name: {{ container_caddy }}
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - {{ vol_caddy_data }}:/data
-      - {{ vol_caddy_config }}:/config
-    networks:
-      - {{ net_caddy }}
-      - {{ net_ghost }}
-      - {{ net_bifrost }}
-    labels:
-      project: "mais"
-      service: "caddy"
-      environment: "production"
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-volumes:
-  {{ vol_caddy_data }}:
-    name: {{ vol_caddy_data }}
-  {{ vol_caddy_config }}:
-    name: {{ vol_caddy_config }}
-
-networks:
-  {{ net_caddy }}:
-    external: true
-    name: {{ net_caddy }}
-  {{ net_ghost }}:
-    external: true
-    name: {{ net_ghost }}
-  {{ net_bifrost }}:
-    external: true
-    name: {{ net_bifrost }}
-"""
-
-# {% raw %} защищает фигурные скобки Caddy от интерпретации Jinja2
-CADDYFILE_TPL = """{% raw %}{
-    email {% endraw %}{{ email_acme }}{% raw %}
-    log {
-        output stdout
-        format json
-    }
-}
-
-# Ghost CMS
-{% endraw %}{{ domain_main }}{% raw %} {
-    reverse_proxy {% endraw %}{{ container_ghost }}{% raw %}:2368 {
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-    }
-    encode gzip
-    @static {
-        path *.css *.js *.png *.jpg *.jpeg *.gif *.ico *.woff *.woff2 *.ttf
-    }
-    handle @static {
-        header Cache-Control "public, max-age=31536000"
-    }
-}
-
-# Редирект www → основной домен
-{% endraw %}{{ domain_www }}{% raw %} {
-    redir https://{% endraw %}{{ domain_main }}{% raw %}{uri} permanent
-}
-
-# Bifrost AI Router
-{% endraw %}{{ domain_app }}{% raw %} {
-    reverse_proxy {% endraw %}{{ container_bifrost }}{% raw %}:8080
-    encode gzip
-}
-{% endraw %}"""
 
 # ============================================================
 # УТИЛИТЫ
@@ -255,23 +103,26 @@ def print_error(text):
     print(f"{Colors.FAIL}✗ {text}{Colors.ENDC}")
 
 
-def run_command(cmd, check=True, capture=False):
-    """Безопасный запуск команд без shell=True"""
+def run_command(cmd, check=True, capture=False, timeout=120):
     try:
         if isinstance(cmd, str):
             cmd = ["bash", "-c", cmd]
-
         if capture:
-            result = subprocess.run(cmd, check=check, capture_output=True, text=True)
+            result = subprocess.run(cmd, check=check, capture_output=True, text=True, timeout=timeout)
             return result.stdout.strip()
         else:
-            result = subprocess.run(cmd, check=check)
+            result = subprocess.run(cmd, check=check, timeout=timeout)
             return result.returncode == 0
     except subprocess.CalledProcessError as e:
         if check:
-            print_error(f"Ошибка выполнения: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
+            cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
+            print_error(f"Ошибка выполнения: {cmd_str}")
             if e.stderr:
                 print_error(f"stderr: {e.stderr.strip()}")
+        return False
+    except subprocess.TimeoutExpired:
+        cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
+        print_warning(f"Таймаут команды: {cmd_str}")
         return False
 
 
@@ -285,22 +136,7 @@ def check_root():
         sys.exit(1)
 
 
-def render_template(template_str, context):
-    """Безопасная генерация конфигов через Jinja2"""
-    tpl = Template(template_str)
-    return tpl.render(**context)
-
-
-def write_config(path, template_str, context):
-    """Рендерит шаблон и записывает файл"""
-    content = render_template(template_str, context)
-    with open(path, 'w') as f:
-        f.write(content)
-    print_success(f"Создан конфиг: {path}")
-
-
 def wait_for_container(name, timeout=60, interval=3):
-    """Ждет пока контейнер станет healthy или running"""
     print_step(f"Ожидание запуска {name} (макс. {timeout}с)...")
     elapsed = 0
     while elapsed < timeout:
@@ -316,20 +152,16 @@ def wait_for_container(name, timeout=60, interval=3):
             if status == "true":
                 print_success(f"{name} запущен (без healthcheck)")
                 return True
-
         if status in ("healthy", "running"):
             print_success(f"{name} готов ({elapsed}с)")
             return True
-
         time.sleep(interval)
         elapsed += interval
-
     print_warning(f"Таймаут ожидания {name} ({timeout}с). Проверьте: docker logs {name}")
     return False
 
 
 def check_dns(domain):
-    """Проверяет резолвинг домена"""
     try:
         socket.gethostbyname(domain)
         return True
@@ -338,7 +170,6 @@ def check_dns(domain):
 
 
 def network_exists(name):
-    """Проверяет существование Docker-сети"""
     result = run_command(
         ["docker", "network", "ls", "--filter", f"name=^{name}$", "--format", "{{.Name}}"],
         check=False, capture=True
@@ -346,18 +177,98 @@ def network_exists(name):
     return result == name
 
 
+def container_exists(name):
+    result = run_command(
+        ["docker", "ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Names}}"],
+        check=False, capture=True
+    )
+    return result == name
+
+
+def volume_exists(name):
+    result = run_command(
+        ["docker", "volume", "ls", "--filter", f"name=^{name}$", "--format", "{{.Name}}"],
+        check=False, capture=True
+    )
+    return result == name
+
+
 # ============================================================
-# ШАГ 1: ОБНОВЛЕНИЕ СИСТЕМЫ
+# РАБОТА С ШАБЛОНАМИ
 # ============================================================
-def update_system():
-    print_header("1. Обновление системы")
-    run_command(["apt-get", "update", "-qq"])
-    run_command([
-        "apt-get", "install", "-y", "-qq",
-        "curl", "wget", "git", "ca-certificates",
-        "gnupg", "lsb-release", "nftables", "python3-jinja2"
-    ])
-    print_success("Система обновлена")
+def render_template(template_name, context):
+    env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
+    tpl = env.get_template(template_name)
+    return tpl.render(**context)
+
+
+def write_config(path, template_name, context):
+    content = render_template(template_name, context)
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    path_obj.write_text(content)
+    print_success(f"Создан конфиг: {path}")
+
+
+def file_contains(path, pattern):
+    if not os.path.exists(path):
+        return False
+    with open(path) as f:
+        return re.search(pattern, f.read()) is not None
+
+
+# ============================================================
+# ШАГ 1: ZRAM (вместо статичного swap)
+# ============================================================
+def setup_zram():
+    print_header("1. Настройка ZRAM")
+
+    existing_swap = run_command(["swapon", "--show", "--noheadings"], capture=True, check=False)
+    if "zram" in existing_swap:
+        print_success("ZRAM уже активен")
+        return
+
+    run_command(["apt-get", "install", "-y", "-qq", "systemd-zram-generator"], check=False)
+
+    gen_path = Path("/lib/systemd/system-generators/systemd-zram-generator")
+    if gen_path.exists():
+        zram_conf = """[zram0]
+zram-size = ram * 2
+compression-algorithm = lz4
+swap-priority = 100
+"""
+        zram_conf_path = Path("/etc/systemd/zram-generator.conf")
+        if not zram_conf_path.exists():
+            zram_conf_path.write_text(zram_conf)
+            run_command(["systemctl", "daemon-reload"])
+            run_command(["systemctl", "start", "systemd-zram-generator"])
+            print_success("ZRAM настроен через systemd-zram-generator (2x RAM, lz4)")
+        else:
+            print_success("ZRAM config уже существует")
+    else:
+        run_command(["apt-get", "install", "-y", "-qq", "zram-tools"])
+        zram_conf = """# Managed by mais_server_setup.py
+ZRAM_DEVICES=1
+ZRAM_SIZE=2048
+ZRAM_ALG=lz4
+ZRAM_PRIORITY=100
+"""
+        zram_tools_path = Path("/etc/default/zram-tools")
+        if not zram_tools_path.exists() or zram_tools_path.read_text() != zram_conf:
+            zram_tools_path.write_text(zram_conf)
+            run_command(["systemctl", "enable", "zramswap"])
+            run_command(["systemctl", "restart", "zramswap"])
+            print_success("ZRAM настроен через zram-tools (2GB, lz4)")
+        else:
+            print_success("ZRAM config уже существует")
+
+    sysctl_file = Path("/etc/sysctl.d/99-mais-zram.conf")
+    if not sysctl_file.exists():
+        sysctl_file.write_text("vm.swappiness=60\n")
+        run_command(["sysctl", "vm.swappiness=60"])
+        print_success("vm.swappiness=60 установлен")
+    else:
+        print_success("vm.swappiness уже настроен")
 
 
 # ============================================================
@@ -366,7 +277,8 @@ def update_system():
 def install_docker():
     print_header("2. Установка Docker")
 
-    if run_command(["docker", "--version"], check=False, capture=True):
+    docker_installed = run_command(["docker", "--version"], check=False, capture=True)
+    if docker_installed:
         print_warning("Docker уже установлен")
     else:
         run_command(["apt-get", "remove", "-y",
@@ -398,83 +310,165 @@ def install_docker():
         ])
         print_success("Docker установлен")
 
-    daemon_config = {
-        "registry-mirrors": ["https://dh-mirror.gitverse.ru"],
-        "log-driver": "json-file",
-        "log-opts": {"max-size": "10m", "max-file": "3"}
-    }
-    with open("/etc/docker/daemon.json", 'w') as f:
-        json.dump(daemon_config, f, indent=2)
-    run_command(["systemctl", "restart", "docker"])
-
+    run_command(["systemctl", "enable", "docker"], check=False)
+    run_command(["systemctl", "start", "docker"], check=False)
     run_command(["usermod", "-aG", "docker", CONFIG['user']], check=False)
-    run_command(["systemctl", "enable", "docker"])
-    run_command(["systemctl", "start", "docker"])
-    print_success("Docker настроен")
+    print_success("Docker сервис активен")
+
+
+def configure_docker_daemon():
+    print_step("Настройка Docker Daemon (ротация логов, registry mirror)")
+
+    daemon_path = Path("/etc/docker/daemon.json")
+    config = {}
+    if daemon_path.exists():
+        try:
+            config = json.loads(daemon_path.read_text())
+        except json.JSONDecodeError:
+            print_warning("Повреждён daemon.json, будет перезаписан")
+
+    config["log-driver"] = "json-file"
+    config["log-opts"] = {"max-size": "10m", "max-file": "3"}
+    config["registry-mirrors"] = ["https://dh-mirror.gitverse.ru"]
+
+    daemon_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    run_command(["systemctl", "restart", "docker"])
+    print_success("Docker Daemon настроен")
 
 
 # ============================================================
-# ШАГ 3: ФАЕРВОЛ
+# ШАГ 3: ФАЕРВОЛ (nftables drop-in)
 # ============================================================
-def configure_firewall():
-    print_header("3. Настройка фаервола")
+def setup_firewall_rules():
+    print_header("3. Настройка фаервола (drop-in)")
 
-    run_command(["modprobe", "br_netfilter"])
-    modules_path = "/etc/modules-load.d/br_netfilter.conf"
-    if not os.path.exists(modules_path):
-        with open(modules_path, "w") as f:
-            f.write("br_netfilter\n")
+    nft_d = Path("/etc/nftables.d")
+    nft_d.mkdir(parents=True, exist_ok=True)
 
-    sysctl_conf = """net.bridge.bridge-nf-call-iptables = 1
+    main_conf = Path("/etc/nftables.conf")
+    include_line = 'include "/etc/nftables.d/*.nft"'
+
+    if main_conf.exists():
+        content = main_conf.read_text()
+        if include_line not in content:
+            with open(main_conf, 'a') as f:
+                f.write(f"\n# App.mais rules\n{include_line}\n")
+            print_success("Добавлен include /etc/nftables.d/*.nft в nftables.conf")
+    else:
+        nftables_conf = f"""#!/usr/sbin/nft -f
+flush ruleset
+
+table inet filter {{
+    chain input {{
+        type filter hook input priority filter; policy drop;
+        ct state established,related accept
+        iifname "lo" accept
+        icmp type {{ echo-reply, echo-request }} accept
+        tcp dport 22 accept
+    }}
+    chain forward {{
+        type filter hook forward priority filter; policy drop;
+        accept
+    }}
+    chain output {{
+        type filter hook output priority filter; policy accept;
+    }}
+}}
+
+{include_line}
+"""
+        main_conf.write_text(nftables_conf)
+        print_success("Создан базовый nftables.conf")
+
+    dropin_path = nft_d / "99-mais-app.nft"
+    nft_rules = """#!/usr/sbin/nft -f
+# Managed by mais_server_setup.py
+add rule inet filter input tcp dport { 80, 443 } accept comment "app-mais-http-https"
+add rule inet filter input udp dport 443 accept comment "app-mais-quic"
+"""
+    if not dropin_path.exists():
+        dropin_path.write_text(nft_rules)
+        print_success("Создан /etc/nftables.d/99-mais-app.nft с правилами 80/443")
+    else:
+        print_success("Правила фаервола уже существуют")
+
+    existing_rules = run_command(
+        ["nft", "list", "chain", "inet", "filter", "input"],
+        capture=True, check=False
+    )
+    if "app-mais-http-https" not in existing_rules and "app-mais" not in existing_rules:
+        run_command(["nft", "-f", str(dropin_path)])
+        print_success("Правила фаервола применены")
+    else:
+        print_success("Правила фаервола уже активны")
+
+
+def configure_sysctl():
+    print_step("Настройка sysctl для Docker")
+
+    sysctl_file = Path("/etc/sysctl.d/99-mais-docker.conf")
+    if not sysctl_file.exists():
+        params = """net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.rp_filter = 0
 """
-    with open("/etc/sysctl.d/99-docker.conf", "w") as f:
-        f.write(sysctl_conf)
-    run_command(["sysctl", "--system"])
+        sysctl_file.write_text(params)
+        run_command(["sysctl", "--system"])
+        print_success("Sysctl параметры Docker применены")
+    else:
+        print_success("Sysctl параметры уже настроены")
 
-    nftables_conf = """#!/usr/sbin/nft -f
-flush ruleset
-
-table inet filter {
-    chain input {
-        type filter hook input priority filter; policy drop;
-        ct state established,related accept
-        iifname "lo" accept
-        icmp type { echo-reply, echo-request } accept
-        tcp dport 22 accept
-        tcp dport { 80, 443 } accept
-        udp dport 443 accept
-    }
-    chain forward {
-        type filter hook forward priority filter; policy drop;
-        accept
-    }
-    chain output {
-        type filter hook output priority filter; policy accept;
-    }
-}
-"""
-    with open("/etc/nftables.conf", "w") as f:
-        f.write(nftables_conf)
-    run_command(["nft", "-f", "/etc/nftables.conf"], check=False)
-    run_command(["systemctl", "enable", "nftables"], check=False)
-    print_success("Фаервол настроен")
+    if not os.path.exists("/etc/modules-load.d/br_netfilter.conf"):
+        Path("/etc/modules-load.d/br_netfilter.conf").write_text("br_netfilter\n")
+        run_command(["modprobe", "br_netfilter"], check=False)
+        print_success("br_netfilter модуль настроен")
 
 
 # ============================================================
-# ШАГ 4: СТРУКТУРА ПАПОК
+# ШАГ 4: СЕКРЕТЫ И БЕЗОПАСНОСТЬ
+# ============================================================
+def setup_secrets():
+    print_header("4. Настройка секретов")
+
+    secrets_dir = Path("/opt/secrets")
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+
+    bifrost_env = secrets_dir / "bifrost.env"
+    if bifrost_env.exists():
+        print_success(f"Файл {bifrost_env} найден")
+    else:
+        bifrost_env.write_text("# Bifrost API Keys\n# OPENAI_API_KEY=\n# ANTHROPIC_API_KEY=\n")
+        bifrost_env.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        print_warning(f"Создан пустой шаблон {bifrost_env} — добавьте API-ключи!")
+
+
+def setup_app_user():
+    print_step("Проверка пользователя для контейнеров")
+
+    try:
+        pwd.getpwuid(CONFIG['app_uid'])
+        print_success(f"Пользователь с UID {CONFIG['app_uid']} существует")
+    except KeyError:
+        run_command([
+            "useradd", "-u", str(CONFIG['app_uid']),
+            "-M", "-s", "/sbin/nologin", "appuser"
+        ])
+        print_success(f"Создан системный пользователь appuser (UID {CONFIG['app_uid']})")
+
+
+# ============================================================
+# ШАГ 5: СТРУКТУРА ПАПОК
 # ============================================================
 def setup_directories():
-    print_header("4. Создание структуры папок")
+    print_header("5. Создание структуры папок")
 
     dirs = [
         f"{CONFIG['docker_dir']}/ghost",
         f"{CONFIG['docker_dir']}/bifrost",
         f"{CONFIG['docker_dir']}/caddy",
     ]
-
     for dir_path in dirs:
         Path(dir_path).mkdir(parents=True, exist_ok=True)
 
@@ -483,17 +477,16 @@ def setup_directories():
 
 
 # ============================================================
-# ШАГ 5: СЕТИ (ИДЕМПОТЕНТНО)
+# ШАГ 6: DOCKER СЕТИ (идемпотентно)
 # ============================================================
 def setup_networks():
-    print_header("5. Создание сетей")
+    print_header("6. Создание сетей")
 
     networks = [
         (CONFIG['net_caddy'], "Публичные сервисы (Caddy)"),
         (CONFIG['net_ghost'], "Ghost CMS"),
         (CONFIG['net_bifrost'], "Bifrost + MCP"),
     ]
-
     for net_name, description in networks:
         if network_exists(net_name):
             print_warning(f"Сеть {net_name} уже существует — пропускаем")
@@ -503,65 +496,81 @@ def setup_networks():
 
 
 # ============================================================
-# ШАГ 6: GHOST
+# ШАГ 7: GHOST
 # ============================================================
 def setup_ghost():
-    print_header("6. Настройка Ghost")
+    print_header("7. Настройка Ghost")
 
-    ghost_dir = f"{CONFIG['docker_dir']}/ghost"
-    write_config(f"{ghost_dir}/compose.yml", GHOST_COMPOSE_TPL, CONFIG)
+    ghost_dir = Path(f"{CONFIG['docker_dir']}/ghost")
+    ghost_dir.mkdir(parents=True, exist_ok=True)
 
-    os.chdir(ghost_dir)
-    run_command(["docker", "compose", "up", "-d"])
-    wait_for_container(CONFIG['container_ghost'], timeout=90)
+    compose_path = ghost_dir / "compose.yml"
+    write_config(str(compose_path), "ghost-compose.yml.j2", CONFIG)
+
+    if container_exists(CONFIG['container_ghost']):
+        print_success(f"Контейнер {CONFIG['container_ghost']} уже существует, перезапуск")
+        os.chdir(str(ghost_dir))
+        run_command(["docker", "compose", "up", "-d"])
+    else:
+        os.chdir(str(ghost_dir))
+        run_command(["docker", "compose", "up", "-d"])
+        wait_for_container(CONFIG['container_ghost'], timeout=90)
 
 
 # ============================================================
-# ШАГ 7: BIFROST
+# ШАГ 8: BIFROST
 # ============================================================
 def setup_bifrost():
-    print_header("7. Настройка Bifrost")
+    print_header("8. Настройка Bifrost")
 
-    bifrost_dir = f"{CONFIG['docker_dir']}/bifrost"
+    bifrost_dir = Path(f"{CONFIG['docker_dir']}/bifrost")
+    bifrost_dir.mkdir(parents=True, exist_ok=True)
 
-    env_path = f"{bifrost_dir}/.env"
-    if not os.path.exists(env_path):
-        with open(env_path, 'w') as f:
-            f.write("# Bifrost API Keys\n# OPENAI_API_KEY=\n# ANTHROPIC_API_KEY=\n")
-        print_warning("Создан пустой .env для Bifrost — добавьте API-ключи!")
+    compose_path = bifrost_dir / "compose.yml"
+    write_config(str(compose_path), "bifrost-compose.yml.j2", CONFIG)
 
-    write_config(f"{bifrost_dir}/compose.yml", BIFROST_COMPOSE_TPL, CONFIG)
-
-    os.chdir(bifrost_dir)
-    run_command(["docker", "compose", "up", "-d"])
-    wait_for_container(CONFIG['container_bifrost'], timeout=60)
+    if container_exists(CONFIG['container_bifrost']):
+        print_success(f"Контейнер {CONFIG['container_bifrost']} уже существует, перезапуск")
+        os.chdir(str(bifrost_dir))
+        run_command(["docker", "compose", "up", "-d"])
+    else:
+        os.chdir(str(bifrost_dir))
+        run_command(["docker", "compose", "up", "-d"])
+        wait_for_container(CONFIG['container_bifrost'], timeout=60)
 
 
 # ============================================================
-# ШАГ 8: CADDY
+# ШАГ 9: CADDY
 # ============================================================
 def setup_caddy():
-    print_header("8. Настройка Caddy")
+    print_header("9. Настройка Caddy")
 
     for domain in [CONFIG['domain_main'], CONFIG['domain_app']]:
         if not check_dns(domain):
             print_warning(f"DNS не настроен для {domain} — Caddy не получит SSL!")
             print_warning("Настройте A-запись и перезапустите: cd /opt/docker/caddy && docker compose restart")
 
-    caddy_dir = f"{CONFIG['docker_dir']}/caddy"
-    write_config(f"{caddy_dir}/compose.yml", CADDY_COMPOSE_TPL, CONFIG)
-    write_config(f"{caddy_dir}/Caddyfile", CADDYFILE_TPL, CONFIG)
+    caddy_dir = Path(f"{CONFIG['docker_dir']}/caddy")
+    caddy_dir.mkdir(parents=True, exist_ok=True)
 
-    os.chdir(caddy_dir)
-    run_command(["docker", "compose", "up", "-d"])
-    wait_for_container(CONFIG['container_caddy'], timeout=30)
+    write_config(str(caddy_dir / "compose.yml"), "caddy-compose.yml.j2", CONFIG)
+    write_config(str(caddy_dir / "Caddyfile"), "Caddyfile.j2", CONFIG)
+
+    if container_exists(CONFIG['container_caddy']):
+        print_success(f"Контейнер {CONFIG['container_caddy']} уже существует, перезапуск")
+        os.chdir(str(caddy_dir))
+        run_command(["docker", "compose", "up", "-d"])
+    else:
+        os.chdir(str(caddy_dir))
+        run_command(["docker", "compose", "up", "-d"])
+        wait_for_container(CONFIG['container_caddy'], timeout=30)
 
 
 # ============================================================
-# ШАГ 9: ПРОВЕРКА
+# ШАГ 10: ПРОВЕРКА
 # ============================================================
 def verify():
-    print_header("9. Проверка")
+    print_header("10. Проверка")
 
     print("\nКонтейнеры:")
     print(run_command(
@@ -590,26 +599,81 @@ def verify():
     else:
         print_warning("Порты 80/443 не обнаружены!")
 
+    zram_status = run_command(["swapon", "--show"], capture=True)
+    if "zram" in zram_status:
+        print_success("ZRAM активен")
+        print(zram_status)
+    else:
+        print_warning("ZRAM не обнаружен")
+
 
 # ============================================================
-# ШАГ 10: УТИЛИТЫ
+# ШАГ 11: ОБСЛУЖИВАНИЕ (cron)
+# ============================================================
+def setup_maintenance():
+    print_header("11. Обслуживание диска")
+
+    cron_path = Path("/etc/cron.d/mais-docker-prune")
+    cron_content = """SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Еженедельная очистка Docker (воскресенье 3:00)
+0 3 * * 0 root docker system prune -af --volumes 2>&1 | logger -t mais-docker-prune
+"""
+    if not cron_path.exists() or cron_path.read_text() != cron_content:
+        cron_path.write_text(cron_content)
+        cron_path.chmod(0o644)
+        print_success("Cron-задача docker prune установлена (каждое воскресенье в 3:00)")
+    else:
+        print_success("Cron-задача уже существует")
+
+
+# ============================================================
+# ШАГ 12: УТИЛИТЫ УПРАВЛЕНИЯ
 # ============================================================
 def create_utils():
-    print_header("10. Утилиты")
+    print_header("12. Утилиты управления")
 
     scripts = {
-        "status": '#!/bin/bash\necho "=== Контейнеры ==="\ndocker ps --format "table {{.Names}}\\t{{.Status}}" --filter "label=project=mais"\necho -e "\\n=== Сети ==="\ndocker network ls --filter "name=mais-"\necho -e "\\n=== Volumes ==="\ndocker volume ls --filter "name=mais-"\n',
-        "logs": '#!/bin/bash\nSERVICE=$1\ncase $SERVICE in\n    ghost) docker logs -f --tail 50 mais-ghost ;;\n    bifrost) docker logs -f --tail 50 mais-bifrost ;;\n    caddy) docker logs -f --tail 50 mais-caddy ;;\n    *) echo "Использование: mais-logs [ghost|bifrost|caddy]" ;;\nesac\n',
-        "restart": '#!/bin/bash\nSERVICE=$1\ncase $SERVICE in\n    ghost) docker restart mais-ghost ;;\n    bifrost) docker restart mais-bifrost ;;\n    caddy) docker restart mais-caddy ;;\n    all) docker restart mais-ghost mais-bifrost mais-caddy ;;\n    *) echo "Использование: mais-restart [ghost|bifrost|caddy|all]" ;;\nesac\n',
+        "status": r"""#!/bin/bash
+echo "=== Контейнеры ==="
+docker ps --format "table {{.Names}}\t{{.Status}}" --filter "label=project=mais"
+echo -e "\n=== Сети ==="
+docker network ls --filter "name=mais-"
+echo -e "\n=== Volumes ==="
+docker volume ls --filter "name=mais-"
+""",
+        "logs": r"""#!/bin/bash
+SERVICE=$1
+case $SERVICE in
+    ghost) docker logs -f --tail 50 mais-ghost ;;
+    bifrost) docker logs -f --tail 50 mais-bifrost ;;
+    caddy) docker logs -f --tail 50 mais-caddy ;;
+    *) echo "Использование: mais-logs [ghost|bifrost|caddy]" ;;
+esac
+""",
+        "restart": r"""#!/bin/bash
+SERVICE=$1
+case $SERVICE in
+    ghost) docker restart mais-ghost ;;
+    bifrost) docker restart mais-bifrost ;;
+    caddy) docker restart mais-caddy ;;
+    all) docker restart mais-ghost mais-bifrost mais-caddy ;;
+    *) echo "Использование: mais-restart [ghost|bifrost|caddy|all]" ;;
+esac
+""",
     }
 
     for name, content in scripts.items():
-        path = f"/usr/local/bin/mais-{name}"
-        with open(path, 'w') as f:
-            f.write(content)
-        run_command(["chmod", "+x", path])
+        path = Path("/usr/local/bin") / f"mais-{name}"
+        if not path.exists() or path.read_text() != content:
+            path.write_text(content)
+            path.chmod(0o755)
+            print_success(f"Создан: mais-{name}")
+        else:
+            print_success(f"mais-{name} уже существует")
 
-    print_success("Созданы: mais-status, mais-logs, mais-restart")
+    print_success("Утилиты управления готовы")
 
 
 # ============================================================
@@ -624,10 +688,12 @@ def final():
   • Bifrost {CONFIG['bifrost_version']} → {CONFIG['domain_app']}
   • Caddy {CONFIG['caddy_version']} (reverse proxy + HTTPS)
 
-{Colors.OKGREEN}Имена:{Colors.ENDC}
-  • Контейнеры: mais-ghost, mais-bifrost, mais-caddy
-  • Сети: mais-caddy-net, mais-ghost-net, mais-bifrost-net
-  • Volumes: mais-ghost-data, mais-bifrost-data, mais-caddy-data
+{Colors.OKGREEN}Ресурсы:{Colors.ENDC}
+  • ZRAM: активен (lz4, 2x RAM)
+  • CPU лимиты: Ghost 0.5, Bifrost 0.5, Caddy 0.3
+  • RAM лимиты: Ghost 768M, Bifrost 512M, Caddy 128M
+  • Log rotation: 10MB × 3 файла
+  • Docker prune: еженедельно
 
 {Colors.OKGREEN}Команды:{Colors.ENDC}
   • mais-status   - статус сервисов
@@ -636,12 +702,9 @@ def final():
 
 {Colors.WARNING}Следующие шаги:{Colors.ENDC}
   1. Security Groups: открыть TCP 80, 443 от 0.0.0.0/0
-  2. DNS: mais.agency и app.mais.agency → IP сервера
-  3. Добавить API-ключи в /opt/docker/bifrost/.env
+  2. DNS: {CONFIG['domain_main']} и {CONFIG['domain_app']} → IP сервера
+  3. Добавить API-ключи в /opt/secrets/bifrost.env
   4. Подождать получения SSL-сертификатов Caddy
-
-{Colors.OKCYAN}Проверка SSL:{Colors.ENDC}
-  mais-logs caddy | grep certificate
 """)
 
 
@@ -654,23 +717,30 @@ def main():
     print(f"""
 {Colors.OKCYAN}Конфигурация:{Colors.ENDC}
   • Домены: {CONFIG['domain_main']}, {CONFIG['domain_app']}
-  • Ghost: {CONFIG['ghost_version']}
-  • Bifrost: {CONFIG['bifrost_version']}
-  • Caddy: {CONFIG['caddy_version']}
+  • Ghost: {CONFIG['ghost_version']} (CPU: {CONFIG['ghost_cpus']}, RAM: {CONFIG['ghost_memory']})
+  • Bifrost: {CONFIG['bifrost_version']} (CPU: {CONFIG['bifrost_cpus']}, RAM: {CONFIG['bifrost_memory']})
+  • Caddy: {CONFIG['caddy_version']} (CPU: {CONFIG['caddy_cpus']}, RAM: {CONFIG['caddy_memory']})
+  • ZRAM: lz4, 2x RAM, swappiness=60
 """)
 
     wait_for_input("Начать установку?")
 
     try:
         update_system()
+        setup_zram()
         install_docker()
-        configure_firewall()
+        configure_docker_daemon()
+        setup_firewall_rules()
+        configure_sysctl()
+        setup_secrets()
+        setup_app_user()
         setup_directories()
         setup_networks()
         setup_ghost()
         setup_bifrost()
         setup_caddy()
         verify()
+        setup_maintenance()
         create_utils()
         final()
     except KeyboardInterrupt:
@@ -681,6 +751,20 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+# ============================================================
+# ОБНОВЛЕНИЕ СИСТЕМЫ (интегрировано, без nftables)
+# ============================================================
+def update_system():
+    print_header("0. Обновление системы")
+    run_command(["apt-get", "update", "-qq"])
+    run_command([
+        "apt-get", "install", "-y", "-qq",
+        "curl", "wget", "git", "ca-certificates",
+        "gnupg", "python3-jinja2"
+    ])
+    print_success("Система обновлена")
 
 
 if __name__ == "__main__":
