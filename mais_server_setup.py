@@ -46,7 +46,7 @@ CONFIG = {
     "container_ghost": "mais-ghost",
     "container_bifrost": "mais-bifrost",
     "container_caddy": "mais-caddy",
-    "container_oauth2proxy": "mais-oauth2proxy",
+    "container_auth": "mais-auth",
 
     "net_caddy": "mais-caddy-net",
     "net_ghost": "mais-ghost-net",
@@ -57,9 +57,6 @@ CONFIG = {
     "vol_caddy_data": "mais-caddy-data",
     "vol_caddy_config": "mais-caddy-config",
 
-    "oauth2proxy_env_path": "/opt/secrets/oauth2.env",
-    "oauth2proxy_emails_path": "/opt/secrets/oauth2-emails.txt",
-
     "ghost_cpus": "0.5",
     "ghost_memory": "768M",
     "ghost_node_memory": "512",
@@ -67,11 +64,15 @@ CONFIG = {
     "bifrost_memory": "512M",
     "caddy_cpus": "0.3",
     "caddy_memory": "128M",
+    "auth_cpus": "0.1",
+    "auth_memory": "32M",
 
     "app_uid": 1000,
     "app_gid": 1000,
 
     "bifrost_env_path": "/opt/secrets/bifrost.env",
+    "auth_env_path": "/opt/secrets/auth.env",
+    "auth_config_path": "/opt/secrets/auth_config.yml",
 }
 
 # ============================================================
@@ -500,7 +501,7 @@ def setup_directories():
         f"{CONFIG['docker_dir']}/ghost",
         f"{CONFIG['docker_dir']}/bifrost",
         f"{CONFIG['docker_dir']}/caddy",
-        f"{CONFIG['docker_dir']}/oauth2proxy",
+        f"{CONFIG['docker_dir']}/auth",
     ]
     for dir_path in dirs:
         Path(dir_path).mkdir(parents=True, exist_ok=True)
@@ -575,75 +576,59 @@ def setup_bifrost():
 
 
 # ============================================================
-# ШАГ 9: OAUTH2-PROXY (Yandex)
+# ШАГ 9: Yandex Auth Server (Caddy forward_auth)
 # ============================================================
-def setup_oauth2proxy():
-    print_header("9. Настройка OAuth2-Proxy (Yandex)")
+def setup_auth():
+    print_header("9. Настройка Yandex Auth Server")
 
-    oauth2proxy_env = Path(CONFIG['oauth2proxy_env_path'])
-    oauth2proxy_emails = Path(CONFIG['oauth2proxy_emails_path'])
+    auth_dir = Path(f"{CONFIG['docker_dir']}/auth")
+    auth_dir.mkdir(parents=True, exist_ok=True)
 
-    if not oauth2proxy_env.exists():
-        print_warning(f"Файл {oauth2proxy_env} не найден")
-        print_warning("OAuth2-Proxy не будет запущен без client-id и client-secret")
-        return
+    # Copy auth server source files
+    script_dir = Path(__file__).parent.resolve()
+    src_auth = script_dir / "auth"
+    for f in ["server.py", "Dockerfile", "config.yml"]:
+        shutil.copy2(str(src_auth / f), str(auth_dir / f))
 
-    env_content = oauth2proxy_env.read_text()
-    has_client_id = "OAUTH2_PROXY_CLIENT_ID" in env_content and "''" not in env_content.split("OAUTH2_PROXY_CLIENT_ID=")[1].split("\n")[0].strip("'\"")
-    if not has_client_id:
-        print_warning("OAUTH2_PROXY_CLIENT_ID не задан — пропускаю OAuth2-Proxy")
-        return
-
-    oauth2proxy_dir = Path(f"{CONFIG['docker_dir']}/oauth2proxy")
-    oauth2proxy_dir.mkdir(parents=True, exist_ok=True)
-
-    # Generate cookie secret (16 raw bytes) if not set
-    def gen_cookie_secret():
-        return secrets.token_hex(16)[:16]
-
-    if "OAUTH2_PROXY_COOKIE_SECRET" in env_content:
-        for line in env_content.split("\n"):
-            if line.startswith("OAUTH2_PROXY_COOKIE_SECRET="):
-                val = line.split("=", 1)[1].strip().strip("'\"")
-                if not val:
-                    new_secret = gen_cookie_secret()
-                    oauth2proxy_env.write_text(env_content.replace(
-                        line, f"OAUTH2_PROXY_COOKIE_SECRET={new_secret}"
-                    ))
-                    print_success("OAUTH2_PROXY_COOKIE_SECRET сгенерирован автоматически")
-                break
-
-    # Write emails.txt from env
-    emails = []
-    for line in env_content.split("\n"):
-        if line.startswith("OAUTH2_PROXY_EMAIL_WHITELIST="):
-            val = line.split("=", 1)[1].strip().strip("'\"")
-            emails = [e.strip() for e in val.split(",") if e.strip()]
-            break
-
-    if not emails:
-        print_warning("OAUTH2_PROXY_EMAIL_WHITELIST пуст — пропускаю OAuth2-Proxy")
-        return
-
-    oauth2proxy_emails.write_text("\n".join(emails) + "\n")
-    oauth2proxy_emails.chmod(0o600)
-    print_success(f"Создан emails.txt с {len(emails)} email'ами")
-
-    # Copy env to docker dir
-    shutil.copy2(str(oauth2proxy_env), str(oauth2proxy_dir / ".env"))
-    (oauth2proxy_dir / ".env").chmod(0o600)
-
-    compose_path = oauth2proxy_dir / "compose.yml"
-    write_config(str(compose_path), "oauth2proxy-compose.yml.j2", CONFIG)
-
-    if container_exists(CONFIG['container_oauth2proxy']):
-        print_success(f"Контейнер {CONFIG['container_oauth2proxy']} уже существует, перезапуск")
-        os.chdir(str(oauth2proxy_dir))
-        run_command(["docker", "compose", "up", "-d"])
+    # Create secrets template if missing
+    auth_env = Path(CONFIG['auth_env_path'])
+    if not auth_env.exists():
+        auth_env.write_text("""# Yandex OAuth credentials — https://oauth.yandex.ru/
+YANDEX_CLIENT_ID=
+YANDEX_CLIENT_SECRET=
+REDIRECT_URL=https://app.mais.agency/oauth2/callback
+COOKIE_SECRET=
+""")
+        auth_env.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        print_warning(f"Создан шаблон {auth_env} — заполните YANDEX_CLIENT_ID, YANDEX_CLIENT_SECRET и COOKIE_SECRET!")
     else:
-        os.chdir(str(oauth2proxy_dir))
-        run_command(["docker", "compose", "up", "-d"])
-        wait_for_container(CONFIG['container_oauth2proxy'], timeout=30)
+        print_success(f"Файл {auth_env} найден")
+
+    # Copy auth config
+    auth_config = Path(CONFIG['auth_config_path'])
+    if not auth_config.exists():
+        shutil.copy2(str(auth_dir / "config.yml"), str(auth_config))
+        auth_config.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        print_success(f"Создан {auth_config}")
+    else:
+        print_success(f"Файл {auth_config} найден")
+
+    # Copy env to docker dir for compose
+    shutil.copy2(str(auth_env), str(auth_dir / ".env"))
+    (auth_dir / ".env").chmod(0o600)
+
+    # Generate and start auth
+    compose_path = auth_dir / "compose.yml"
+    write_config(str(compose_path), "auth-compose.yml.j2", CONFIG)
+
+    if container_exists(CONFIG['container_auth']):
+        print_success(f"Контейнер {CONFIG['container_auth']} уже существует, перезапуск")
+        os.chdir(str(auth_dir))
+        run_command(["docker", "compose", "up", "-d", "--build"])
+    else:
+        os.chdir(str(auth_dir))
+        run_command(["docker", "compose", "up", "-d", "--build"])
+        wait_for_container(CONFIG['container_auth'], timeout=30)
 
 
 # ============================================================
@@ -756,8 +741,8 @@ case $SERVICE in
     ghost) docker logs -f --tail 50 mais-ghost ;;
     bifrost) docker logs -f --tail 50 mais-bifrost ;;
     caddy) docker logs -f --tail 50 mais-caddy ;;
-    oauth2proxy) docker logs -f --tail 50 mais-oauth2proxy ;;
-    *) echo "Использование: mais-logs [ghost|bifrost|caddy|oauth2proxy]" ;;
+        auth) docker logs -f --tail 50 mais-auth ;;
+    *) echo "Использование: mais-logs [ghost|bifrost|caddy|auth]" ;;
 esac
 """,
         "restart": r"""#!/bin/bash
@@ -766,9 +751,9 @@ case $SERVICE in
     ghost) docker restart mais-ghost ;;
     bifrost) docker restart mais-bifrost ;;
     caddy) docker restart mais-caddy ;;
-    oauth2proxy) docker restart mais-oauth2proxy ;;
-    all) docker restart mais-ghost mais-bifrost mais-caddy mais-oauth2proxy ;;
-    *) echo "Использование: mais-restart [ghost|bifrost|caddy|oauth2proxy|all]" ;;
+    auth) docker restart mais-auth ;;
+    all) docker restart mais-auth mais-bifrost mais-caddy mais-ghost ;;
+    *) echo "Использование: mais-restart [ghost|bifrost|caddy|auth|all]" ;;
 esac
 """,
     }
@@ -796,25 +781,25 @@ def final():
   • Ghost {CONFIG['ghost_version']} → {CONFIG['domain_main']}
   • Bifrost {CONFIG['bifrost_version']} → {CONFIG['domain_app']}
   • Caddy {CONFIG['caddy_version']} (reverse proxy + HTTPS)
-  • OAuth2-Proxy (Yandex) → {CONFIG['domain_app']} (защита email whitelist)
+  • Yandex Auth (Caddy forward_auth) → {CONFIG['domain_app']}
 
 {Colors.OKGREEN}Ресурсы:{Colors.ENDC}
   • ZRAM: активен (lz4, 2x RAM)
   • CPU лимиты: Ghost 0.5, Bifrost 0.5, Caddy 0.3
-  • RAM лимиты: Ghost 768M, Bifrost 512M, Caddy 128M
+  • RAM лимиты: Ghost 768M, Bifrost 512M, Caddy 128M, Auth 32M
   • Log rotation: 10MB × 3 файла
   • Docker prune: еженедельно
 
 {Colors.OKGREEN}Команды:{Colors.ENDC}
   • mais-status   - статус сервисов
-  • mais-logs     - логи (mais-logs ghost|bifrost|caddy)
+  • mais-logs     - логи (mais-logs ghost|bifrost|caddy|auth)
   • mais-restart  - перезапуск
 
 {Colors.WARNING}Следующие шаги:{Colors.ENDC}
   1. Security Groups: открыть TCP 80, 443 от 0.0.0.0/0
   2. DNS: {CONFIG['domain_main']} и {CONFIG['domain_app']} → IP сервера
   3. Добавить API-ключи в /opt/secrets/bifrost.env
-  4. Добавить OAuth2-ключи в {CONFIG['oauth2proxy_env_path']}
+  4. Добавить OAuth2-ключи в {CONFIG['auth_env_path']}
   5. Подождать получения SSL-сертификатов Caddy
 """)
 
@@ -831,6 +816,7 @@ def main():
   • Ghost: {CONFIG['ghost_version']} (CPU: {CONFIG['ghost_cpus']}, RAM: {CONFIG['ghost_memory']})
   • Bifrost: {CONFIG['bifrost_version']} (CPU: {CONFIG['bifrost_cpus']}, RAM: {CONFIG['bifrost_memory']})
   • Caddy: {CONFIG['caddy_version']} (CPU: {CONFIG['caddy_cpus']}, RAM: {CONFIG['caddy_memory']})
+  • Auth: Yandex OAuth (CPU: {CONFIG['auth_cpus']}, RAM: {CONFIG['auth_memory']})
   • ZRAM: lz4, 2x RAM, swappiness=60
 """)
 
@@ -849,7 +835,7 @@ def main():
         setup_networks()
         setup_ghost()
         setup_bifrost()
-        setup_oauth2proxy()
+        setup_auth()
         setup_caddy()
         verify()
         setup_maintenance()

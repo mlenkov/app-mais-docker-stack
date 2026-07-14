@@ -1,0 +1,29 @@
+# Yandex OAuth Auth — configuration
+# Environment variables (YANDEX_CLIENT_ID, YANDEX_CLIENT_SECRET, REDIRECT_URL, COOKIE_SECRET)
+# override corresponding oauth.* values.
+
+server:
+  listen: "0.0.0.0:4180"
+  domain: ".mais.agency"
+  cookie_name: "_ya_auth"
+  cookie_secret: ""  # use COOKIE_SECRET env var
+
+oauth:
+  client_id: ""       # use YANDEX_CLIENT_ID env var
+  client_secret: ""   # use YANDEX_CLIENT_SECRET env var
+  redirect_url: "https://app.mais.agency/oauth2/callback"
+  scopes:
+    - login:email
+    - login:info
+
+auth:
+  allowed_emails:
+    - mllenkov@yandex.ru
+    - mllenkov@ya.ru
+  # optional: external YAML file with same structure for allowed_emails
+  # allowed_emails_file: "/etc/auth/allowed_emails.yml"
+
+rate_limit:
+  requests_per_sec: 500
+  burst: 1000
+  cleanup_interval: 60

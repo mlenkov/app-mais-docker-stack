@@ -27,9 +27,26 @@
     redir https://{% endraw %}{{ domain_main }}{% raw %}{uri} permanent
 }
 
-# Bifrost AI Router (через OAuth2-Proxy)
+# Bifrost AI Router с Yandex OAuth
 {% endraw %}{{ domain_app }}{% raw %} {
-    reverse_proxy {% endraw %}{{ container_oauth2proxy }}{% raw %}:4180
-    encode gzip
+    @open path /v1/* /health /mcp/*
+    handle @open {
+        encode gzip
+        reverse_proxy {% endraw %}{{ container_bifrost }}{% raw %}:8080
+    }
+
+    @auth path /start /oauth2/callback /oauth/callback /logout /ping
+    handle @auth {
+        reverse_proxy {% endraw %}{{ container_auth }}{% raw %}:4180
+    }
+
+    handle {
+        forward_auth {% endraw %}{{ container_auth }}{% raw %}:4180 {
+            uri /auth
+            copy_headers X-Auth-Request-User X-Forwarded-User X-Auth-Request-Email X-Forwarded-Email
+        }
+        encode gzip
+        reverse_proxy {% endraw %}{{ container_bifrost }}{% raw %}:8080
+    }
 }
 {% endraw %}

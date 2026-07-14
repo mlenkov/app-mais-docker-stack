@@ -25,12 +25,36 @@ services:
         limits:
           cpus: '{{ caddy_cpus }}'
           memory: {{ caddy_memory }}
+    depends_on:
+      - auth
+
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  auth:
+    image: mais/yandex-auth:latest
+    container_name: {{ container_auth }}
+    restart: unless-stopped
+    expose:
+      - "4180"
+    env_file: {{ auth_env_path }}
+    volumes:
+      - {{ auth_config_path }}:/etc/auth/config.yml:ro
+    networks:
+      - {{ net_caddy }}
+    labels:
+      project: "mais"
+      service: "auth"
+      environment: "production"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: "32M"
 
 volumes:
   {{ vol_caddy_data }}:

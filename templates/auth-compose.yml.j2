@@ -1,0 +1,36 @@
+name: mais
+services:
+  auth:
+    build:
+      context: /opt/docker/auth
+      dockerfile: Dockerfile
+    image: mais/yandex-auth:latest
+    container_name: {{ container_auth }}
+    restart: unless-stopped
+    expose:
+      - "4180"
+    env_file: {{ auth_env_path }}
+    volumes:
+      - {{ auth_config_path }}:/etc/auth/config.yml:ro
+    networks:
+      - {{ net_caddy }}
+    labels:
+      project: "mais"
+      service: "auth"
+      environment: "production"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: "32M"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:4180/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  {{ net_caddy }}:
+    external: true
+    name: {{ net_caddy }}

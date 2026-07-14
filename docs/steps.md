@@ -42,7 +42,7 @@
 
 ## Шаг 4. Секреты (`setup_secrets`, `setup_app_user`)
 
-- Создаёт `/opt/secrets/bifrost.env` (chmod 600), если не существует
+- Создаёт `/opt/secrets/bifrost.env` (chmod 600), шаблон `/opt/secrets/auth.env`
 - Создаёт системного пользователя `appuser` (UID 1000) для запуска контейнеров не от root
 
 ## Шаг 5. Структура папок (`setup_directories`)
@@ -50,6 +50,7 @@
 - `/opt/docker/ghost/`
 - `/opt/docker/bifrost/`
 - `/opt/docker/caddy/`
+- `/opt/docker/auth/`
 - Владелец: `mais:mais`
 
 ## Шаг 6. Docker-сети (`setup_networks`)
@@ -58,7 +59,7 @@
 
 | Сеть | Назначение |
 |------|------------|
-| `mais-caddy-net` | Публичные сервисы (Caddy) |
+| `mais-caddy-net` | Публичные сервисы (Caddy, Auth) |
 | `mais-ghost-net` | Ghost CMS |
 | `mais-bifrost-net` | Bifrost + MCP |
 
@@ -79,32 +80,46 @@
 - Порт: 8080 (internal)
 - Запуск и ожидание healthcheck (max 60 секунд)
 
-## Шаг 9. Caddy (`setup_caddy`)
+## Шаг 9. Yandex Auth (`setup_auth`)
+
+- Копирование `server.py`, `Dockerfile`, `config.yml` в `/opt/docker/auth/`
+- Создание `/opt/secrets/auth_config.yml` с rate limit 500/s, burst 1000
+- Создание шаблона `/opt/secrets/auth.env` (YANDEX_CLIENT_ID, YANDEX_CLIENT_SECRET, COOKIE_SECRET)
+- Сборка Docker-образа `mais/yandex-auth:latest`
+- Генерация `compose.yml` из `templates/auth-compose.yml.j2`
+- CPU лимит: 0.1, RAM лимит: 32M
+- Запуск и ожидание healthcheck (max 30 секунд)
+
+**Rate limiter**: ключируется по email пользователя (не по IP Caddy), 500 req/s с burst 1000.
+
+## Шаг 10. Caddy (`setup_caddy`)
 
 - Проверка DNS для `mais.agency` и `app.mais.agency`
 - Генерация `compose.yml` и `Caddyfile` из шаблонов
+- Caddyfile использует `forward_auth` к `mais-auth:4180` для всех запросов, кроме `@open` (`/v1/*`, `/health`, `/mcp/*`)
+- `copy_headers`: X-Auth-Request-User, X-Forwarded-User, X-Auth-Request-Email, X-Forwarded-Email
 - CPU лимит: 0.3, RAM лимит: 128M
-- Rate limiting в Caddyfile (20 rps)
+- `depends_on: auth`
 - Порты: 80, 443 (публичные)
 - Запуск и ожидание healthcheck (max 30 секунд)
 
-## Шаг 10. Проверка (`verify`)
+## Шаг 11. Проверка (`verify`)
 
 - Вывод таблицы контейнеров (фильтр: `project=mais`)
 - Вывод сетей и томов
 - Проверка портов 80/443 на хосте
 - Проверка активности ZRAM
 
-## Шаг 11. Обслуживание диска (`setup_maintenance`)
+## Шаг 12. Обслуживание диска (`setup_maintenance`)
 
 - Cron-задача `/etc/cron.d/mais-docker-prune`
 - `docker system prune -af --volumes` каждое воскресенье в 3:00
 - Логи через `logger`
 
-## Шаг 12. Утилиты (`create_utils`)
+## Шаг 13. Утилиты (`create_utils`)
 
 | Скрипт | Описание |
 |--------|----------|
 | `mais-status` | Статус всех контейнеров стека |
-| `mais-logs` | Логи сервиса (ghost/bifrost/caddy) |
-| `mais-restart` | Перезапуск (ghost/bifrost/caddy/all) |
+| `mais-logs` | Логи сервиса (ghost/bifrost/caddy/auth) |
+| `mais-restart` | Перезапуск (ghost/bifrost/caddy/auth/all) |
